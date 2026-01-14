@@ -5,7 +5,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Require database connection
-require_once '../../config/db_connection.php';
+require_once '../config/db_connection.php';
 
 // Function to get user data
 function getUserData($pdo, $user_id = null) {

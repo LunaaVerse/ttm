@@ -50,100 +50,271 @@ $email = $user['email'];
 $role = $user['role'];
 
 // Set current page for active menu highlighting
-$current_page = 'route-info';
+$current_page = 'btrm';
 
-// Get barangay of user (if available)
-$user_barangay_id = isset($user['barangay_id']) ? $user['barangay_id'] : 1; // Default to barangay 1
+// Get user's barangay from their address or default to first barangay
+$barangay_id = 1; // Default - You can implement logic to detect user's barangay based on address
 
-// Fetch active routes for the user's barangay
-$sql_routes = "SELECT tr.*, b.name as barangay_name 
-               FROM tricycle_routes tr 
-               JOIN barangays b ON tr.barangay_id = b.id 
-               WHERE tr.status = 'Active' 
-               AND tr.submission_status = 'Approved'
-               AND tr.barangay_id = :barangay_id 
-               ORDER BY tr.route_name";
-$stmt_routes = $pdo->prepare($sql_routes);
-$stmt_routes->execute(['barangay_id' => $user_barangay_id]);
-$routes = $stmt_routes->fetchAll(PDO::FETCH_ASSOC);
+// Check if database tables exist, create them if not
+function checkAndCreateTables($pdo) {
+    // Check for route_updates_advisories table
+    $check = $pdo->query("SHOW TABLES LIKE 'route_updates_advisories'")->fetch();
+    if (!$check) {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS `route_updates_advisories` (
+            `id` int(11) NOT NULL AUTO_INCREMENT,
+            `update_code` varchar(20) NOT NULL,
+            `update_type` enum('Route Change','Terminal Change','Restriction Update','Service Advisory','Emergency Update','Maintenance Notice') DEFAULT 'Service Advisory',
+            `title` varchar(255) NOT NULL,
+            `description` text NOT NULL,
+            `affected_route_id` int(11) DEFAULT NULL,
+            `affected_barangay_id` int(11) NOT NULL,
+            `effective_date` date DEFAULT NULL,
+            `end_date` date DEFAULT NULL,
+            `status` enum('Active','Expired','Upcoming','Cancelled') DEFAULT 'Active',
+            `priority` enum('Normal','High','Emergency') DEFAULT 'Normal',
+            `created_by` int(11) NOT NULL,
+            `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+            `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `update_code` (`update_code`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;");
+    }
+    
+    // Check for route_feedback table
+    $check = $pdo->query("SHOW TABLES LIKE 'route_feedback'")->fetch();
+    if (!$check) {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS `route_feedback` (
+            `id` int(11) NOT NULL AUTO_INCREMENT,
+            `feedback_code` varchar(20) NOT NULL,
+            `user_id` int(11) NOT NULL,
+            `feedback_type` enum('Route Suggestion','Complaint','Compliment','Question','Report Issue') DEFAULT 'Route Suggestion',
+            `route_id` int(11) DEFAULT NULL,
+            `driver_id` int(11) DEFAULT NULL,
+            `vehicle_number` varchar(20) DEFAULT NULL,
+            `barangay_id` int(11) NOT NULL,
+            `subject` varchar(255) NOT NULL,
+            `message` text NOT NULL,
+            `location` varchar(255) DEFAULT NULL,
+            `incident_date` datetime DEFAULT NULL,
+            `status` enum('Pending','Under Review','Acknowledged','Resolved','Closed') DEFAULT 'Pending',
+            `priority` enum('Low','Medium','High') DEFAULT 'Low',
+            `admin_notes` text DEFAULT NULL,
+            `resolved_by` int(11) DEFAULT NULL,
+            `resolved_date` datetime DEFAULT NULL,
+            `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+            `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `feedback_code` (`feedback_code`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;");
+    }
+    
+    // Check for user_saved_routes table
+    $check = $pdo->query("SHOW TABLES LIKE 'user_saved_routes'")->fetch();
+    if (!$check) {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS `user_saved_routes` (
+            `id` int(11) NOT NULL AUTO_INCREMENT,
+            `user_id` int(11) NOT NULL,
+            `route_id` int(11) NOT NULL,
+            `barangay_id` int(11) NOT NULL,
+            `is_favorite` tinyint(1) DEFAULT 0,
+            `notes` text DEFAULT NULL,
+            `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `user_route` (`user_id`,`route_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;");
+    }
+}
 
-// Fetch terminals for the barangay
-$sql_terminals = "SELECT * FROM route_terminals 
-                  WHERE barangay_id = :barangay_id 
-                  AND status = 'Operational'
-                  ORDER BY terminal_name";
-$stmt_terminals = $pdo->prepare($sql_terminals);
-$stmt_terminals->execute(['barangay_id' => $user_barangay_id]);
-$terminals = $stmt_terminals->fetchAll(PDO::FETCH_ASSOC);
+// Create tables if they don't exist
+checkAndCreateTables($pdo);
 
-// Fetch route restrictions
-$sql_restrictions = "SELECT rr.*, b.name as barangay_name, tr.route_name 
-                     FROM route_restrictions rr
-                     JOIN barangays b ON rr.barangay_id = b.id
-                     LEFT JOIN tricycle_routes tr ON rr.route_id = tr.id
-                     WHERE rr.barangay_id = :barangay_id 
-                     AND rr.status = 'Active'
-                     AND (rr.expiry_date IS NULL OR rr.expiry_date >= CURDATE())
-                     ORDER BY rr.effective_date DESC";
-$stmt_restrictions = $pdo->prepare($sql_restrictions);
-$stmt_restrictions->execute(['barangay_id' => $user_barangay_id]);
-$restrictions = $stmt_restrictions->fetchAll(PDO::FETCH_ASSOC);
+// Handle AJAX requests
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    header('Content-Type: application/json');
+    
+    switch ($_POST['action']) {
+        case 'toggle_favorite':
+            if (!isset($_SESSION['user_id'])) {
+                echo json_encode(['success' => false, 'message' => 'Not authenticated']);
+                exit();
+            }
+            
+            if (!isset($_POST['route_id'])) {
+                echo json_encode(['success' => false, 'message' => 'Missing route_id']);
+                exit();
+            }
+            
+            $user_id = $_SESSION['user_id'];
+            $route_id = intval($_POST['route_id']);
+            
+            try {
+                // Check if already favorited
+                $stmt = $pdo->prepare("SELECT id FROM user_saved_routes WHERE user_id = ? AND route_id = ?");
+                $stmt->execute([$user_id, $route_id]);
+                
+                if ($stmt->rowCount() === 0) {
+                    // Get barangay_id from route
+                    $stmt = $pdo->prepare("SELECT barangay_id FROM tricycle_routes WHERE id = ?");
+                    $stmt->execute([$route_id]);
+                    $route = $stmt->fetch(PDO::FETCH_ASSOC);
+                    
+                    if ($route) {
+                        $stmt = $pdo->prepare("INSERT INTO user_saved_routes (user_id, route_id, barangay_id, is_favorite) VALUES (?, ?, ?, 1)");
+                        $stmt->execute([$user_id, $route_id, $route['barangay_id']]);
+                        echo json_encode(['success' => true, 'action' => 'added']);
+                    } else {
+                        echo json_encode(['success' => false, 'message' => 'Route not found']);
+                    }
+                } else {
+                    $stmt = $pdo->prepare("DELETE FROM user_saved_routes WHERE user_id = ? AND route_id = ?");
+                    $stmt->execute([$user_id, $route_id]);
+                    echo json_encode(['success' => true, 'action' => 'removed']);
+                }
+            } catch (PDOException $e) {
+                echo json_encode(['success' => false, 'message' => 'Database error: ' . $e->getMessage()]);
+            }
+            exit();
+            
+        case 'submit_feedback':
+            if (!isset($_SESSION['user_id'])) {
+                echo json_encode(['success' => false, 'message' => 'Not authenticated']);
+                exit();
+            }
+            
+            // Generate unique feedback code
+            $feedback_code = 'FB-' . date('Y') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
+            
+            try {
+                // Prepare data
+                $data = [
+                    'feedback_code' => $feedback_code,
+                    'user_id' => $_SESSION['user_id'],
+                    'feedback_type' => $_POST['feedback_type'],
+                    'route_id' => !empty($_POST['route_id']) ? $_POST['route_id'] : null,
+                    'barangay_id' => $barangay_id,
+                    'subject' => $_POST['subject'],
+                    'message' => $_POST['message'],
+                    'location' => !empty($_POST['location']) ? $_POST['location'] : null,
+                    'incident_date' => !empty($_POST['incident_date']) ? $_POST['incident_date'] : null,
+                    'vehicle_number' => !empty($_POST['vehicle_number']) ? $_POST['vehicle_number'] : null,
+                    'status' => 'Pending',
+                    'priority' => 'Low'
+                ];
 
-// Fetch service updates
-$sql_updates = "SELECT rsu.*, b.name as barangay_name, 
-                       tr.route_name, rt.terminal_name
-                FROM route_service_updates rsu
-                JOIN barangays b ON rsu.affected_barangay_id = b.id
-                LEFT JOIN tricycle_routes tr ON rsu.affected_route_id = tr.id
-                LEFT JOIN route_terminals rt ON rsu.affected_terminal_id = rt.id
-                WHERE rsu.affected_barangay_id = :barangay_id 
-                AND rsu.status = 'Active'
-                AND (rsu.expiry_date IS NULL OR rsu.expiry_date >= CURDATE())
-                ORDER BY rsu.priority DESC, rsu.effective_date DESC
-                LIMIT 5";
-$stmt_updates = $pdo->prepare($sql_updates);
-$stmt_updates->execute(['barangay_id' => $user_barangay_id]);
-$updates = $stmt_updates->fetchAll(PDO::FETCH_ASSOC);
+                // Insert into database
+                $sql = "INSERT INTO route_feedback 
+                        (feedback_code, user_id, feedback_type, route_id, barangay_id, subject, message, 
+                         location, incident_date, vehicle_number, status, priority, created_at) 
+                        VALUES 
+                        (:feedback_code, :user_id, :feedback_type, :route_id, :barangay_id, :subject, :message, 
+                         :location, :incident_date, :vehicle_number, :status, :priority, NOW())";
+                
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($data);
 
-// Fetch barangay info
-$sql_barangay = "SELECT * FROM barangays WHERE id = :barangay_id";
-$stmt_barangay = $pdo->prepare($sql_barangay);
-$stmt_barangay->execute(['barangay_id' => $user_barangay_id]);
-$barangay = $stmt_barangay->fetch(PDO::FETCH_ASSOC);
+                echo json_encode([
+                    'success' => true,
+                    'feedback_code' => $feedback_code,
+                    'message' => 'Feedback submitted successfully'
+                ]);
+                
+            } catch (PDOException $e) {
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Failed to submit feedback: ' . $e->getMessage()
+                ]);
+            }
+            exit();
+    }
+}
 
-// Handle feedback submission
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
-    try {
-        // Generate unique feedback code
-        $feedback_code = 'FB-' . date('Ymd') . '-' . str_pad(mt_rand(1, 999), 3, '0', STR_PAD_LEFT);
-        
-        // Insert feedback into database
-        $sql = "INSERT INTO route_feedback 
-                (feedback_code, user_id, feedback_type, route_id, terminal_id, barangay_id, 
-                 subject, message, suggestion_details, status, priority, created_at) 
-                VALUES 
-                (:feedback_code, :user_id, :feedback_type, :route_id, :terminal_id, :barangay_id,
-                 :subject, :message, :suggestion, 'Pending', 'Medium', NOW())";
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([
-            'feedback_code' => $feedback_code,
-            'user_id' => $user_id,
-            'feedback_type' => $_POST['feedback_type'],
-            'route_id' => !empty($_POST['route_id']) ? $_POST['route_id'] : null,
-            'terminal_id' => !empty($_POST['terminal_id']) ? $_POST['terminal_id'] : null,
-            'barangay_id' => $user_barangay_id,
-            'subject' => $_POST['subject'],
-            'message' => $_POST['message'],
-            'suggestion' => $_POST['suggestion'] ?? null
-        ]);
-        
-        $feedback_success = true;
-        $feedback_message = "Feedback submitted successfully! Reference: " . $feedback_code;
-        
-    } catch (Exception $e) {
-        $feedback_error = true;
-        $feedback_message = "Error submitting feedback: " . $e->getMessage();
+// Get all active tricycle routes for the user's barangay
+$stmt = $pdo->prepare("
+    SELECT tr.*, b.name as barangay_name, 
+           COUNT(rs.id) as total_stops,
+           (SELECT COUNT(*) FROM tricycle_operators WHERE route_id = tr.id AND status = 'Active') as active_operators,
+           (SELECT COUNT(*) FROM tricycle_drivers WHERE route_id = tr.id AND status = 'Active') as active_drivers
+    FROM tricycle_routes tr
+    JOIN barangays b ON tr.barangay_id = b.id
+    LEFT JOIN route_stops rs ON tr.id = rs.route_id
+    WHERE tr.status = 'Active' 
+    AND tr.barangay_id = :barangay_id
+    AND tr.submission_status IN ('Approved', 'Active')
+    GROUP BY tr.id
+    ORDER BY tr.route_name
+");
+$stmt->execute(['barangay_id' => $barangay_id]);
+$routes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get route stops for each route
+$route_stops = [];
+foreach ($routes as $route) {
+    $stmt = $pdo->prepare("
+        SELECT * FROM route_stops 
+        WHERE route_id = :route_id 
+        ORDER BY stop_number
+    ");
+    $stmt->execute(['route_id' => $route['id']]);
+    $route_stops[$route['id']] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+// Get terminals for the barangay
+$stmt = $pdo->prepare("
+    SELECT * FROM route_terminals 
+    WHERE barangay_id = :barangay_id 
+    AND status = 'Operational'
+    ORDER BY terminal_name
+");
+$stmt->execute(['barangay_id' => $barangay_id]);
+$terminals = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get loading zones for the barangay
+$stmt = $pdo->prepare("
+    SELECT * FROM loading_zones 
+    WHERE barangay_id = :barangay_id 
+    AND status = 'Active'
+    ORDER BY zone_name
+");
+$stmt->execute(['barangay_id' => $barangay_id]);
+$loading_zones = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get route restrictions for the barangay
+$stmt = $pdo->prepare("
+    SELECT rr.*, tr.route_name, b.name as barangay_name
+    FROM route_restrictions rr
+    JOIN barangays b ON rr.barangay_id = b.id
+    LEFT JOIN tricycle_routes tr ON rr.route_id = tr.id
+    WHERE rr.barangay_id = :barangay_id 
+    AND rr.status = 'Active'
+    AND (rr.expiry_date IS NULL OR rr.expiry_date >= CURDATE())
+    ORDER BY rr.restriction_type, rr.road_name
+");
+$stmt->execute(['barangay_id' => $barangay_id]);
+$restrictions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get service updates/advisories for the barangay
+$stmt = $pdo->prepare("
+    SELECT rua.*, tr.route_name, b.name as barangay_name
+    FROM route_updates_advisories rua
+    JOIN barangays b ON rua.affected_barangay_id = b.id
+    LEFT JOIN tricycle_routes tr ON rua.affected_route_id = tr.id
+    WHERE rua.affected_barangay_id = :barangay_id 
+    AND rua.status = 'Active'
+    AND (rua.end_date IS NULL OR rua.end_date >= CURDATE())
+    ORDER BY rua.priority DESC, rua.effective_date DESC
+    LIMIT 10
+");
+$stmt->execute(['barangay_id' => $barangay_id]);
+$updates = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Check if routes are saved as favorites
+$saved_routes = [];
+if (isset($_SESSION['user_id'])) {
+    $stmt = $pdo->prepare("SELECT route_id FROM user_saved_routes WHERE user_id = :user_id");
+    $stmt->execute(['user_id' => $_SESSION['user_id']]);
+    $saved = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($saved as $route_id) {
+        $saved_routes[$route_id] = true;
     }
 }
 ?>
@@ -153,11 +324,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tricycle Route Information - Barangay Resident Portal</title>
+    <title>Barangay Tricycle Route Management - Barangay Resident Portal</title>
     <!-- Boxicons CSS -->
     <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
     <!-- SweetAlert2 CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css">
     <style>
         /* All your existing CSS styles remain the same */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -689,339 +860,183 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
             background-color: rgba(255, 255, 255, 0.05);
         }
         
-        /* New Styles for Route Information Module */
+        /* BTRM Specific Styles */
+        .tab-container {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }
         
-        .quick-nav {
+        .tab-header {
             display: flex;
-            gap: 12px;
-            margin-top: 24px;
-            margin-bottom: 32px;
+            background-color: var(--background-color);
+            border-bottom: 1px solid var(--border-color);
             flex-wrap: wrap;
         }
         
-        .nav-button {
-            padding: 12px 24px;
-            background-color: var(--card-bg);
-            color: var(--text-color);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
+        .tab-button {
+            padding: 15px 25px;
+            background: none;
+            border: none;
+            font-size: 16px;
             font-weight: 500;
+            color: var(--text-light);
             cursor: pointer;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        .nav-button:hover {
-            background-color: var(--primary-color);
-            color: white;
-            border-color: var(--primary-color);
-        }
-        
-        .nav-button.active {
-            background-color: var(--primary-color);
-            color: white;
-            border-color: var(--primary-color);
-        }
-        
-        .section-title {
-            font-size: 24px;
-            font-weight: 600;
-            margin-bottom: 24px;
-            color: var(--text-color);
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        
-        .section-title i {
-            color: var(--primary-color);
-        }
-        
-        .cards-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 24px;
-            margin-bottom: 48px;
-        }
-        
-        .info-card {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 24px;
-            transition: transform 0.3s, box-shadow 0.3s;
-        }
-        
-        .info-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
-        }
-        
-        .dark-mode .info-card:hover {
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
-        }
-        
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-        }
-        
-        .card-title {
-            font-size: 18px;
-            font-weight: 600;
-            color: var(--text-color);
-        }
-        
-        .card-badge {
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 500;
-        }
-        
-        .badge-active {
-            background-color: #dcfce7;
-            color: #166534;
-        }
-        
-        .dark-mode .badge-active {
-            background-color: rgba(16, 185, 129, 0.2);
-            color: #86efac;
-        }
-        
-        .badge-inactive {
-            background-color: #fee2e2;
-            color: #991b1b;
-        }
-        
-        .card-content {
-            margin-bottom: 16px;
-        }
-        
-        .card-item {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 12px;
-            font-size: 14px;
-        }
-        
-        .item-label {
-            color: var(--text-light);
-        }
-        
-        .item-value {
-            font-weight: 500;
-            color: var(--text-color);
-        }
-        
-        .route-stops {
-            margin-top: 16px;
-            padding-top: 16px;
-            border-top: 1px solid var(--border-color);
-        }
-        
-        .stop-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 8px;
-            font-size: 14px;
-        }
-        
-        .stop-number {
-            width: 24px;
-            height: 24px;
-            background-color: var(--primary-color);
-            color: white;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        
-        .terminal-card {
+            transition: all 0.3s ease;
             position: relative;
+            white-space: nowrap;
         }
         
-        .terminal-marker {
-            position: absolute;
-            top: 24px;
-            right: 24px;
-            width: 40px;
-            height: 40px;
-            background-color: rgba(13, 148, 136, 0.1);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+        .tab-button:hover {
             color: var(--primary-color);
+            background-color: rgba(13, 148, 136, 0.1);
         }
         
-        .restriction-card {
-            border-left: 4px solid #f59e0b;
+        .tab-button.active {
+            color: var(--primary-color);
+            background-color: var(--card-bg);
         }
         
-        .restriction-time {
-            display: inline-block;
-            padding: 4px 8px;
-            background-color: #fef3c7;
-            border-radius: 4px;
-            font-size: 12px;
-            margin-top: 8px;
-        }
-        
-        .dark-mode .restriction-time {
-            background-color: rgba(245, 158, 11, 0.2);
-            color: #fcd34d;
-        }
-        
-        .update-card {
-            border-left: 4px solid #3b82f6;
-        }
-        
-        .update-priority {
-            font-size: 12px;
-            padding: 4px 8px;
-            border-radius: 4px;
-            margin-top: 8px;
-        }
-        
-        .priority-high {
-            background-color: #fee2e2;
-            color: #991b1b;
-        }
-        
-        .dark-mode .priority-high {
-            background-color: rgba(239, 68, 68, 0.2);
-            color: #fca5a5;
-        }
-        
-        .priority-medium {
-            background-color: #fef3c7;
-            color: #92400e;
-        }
-        
-        .dark-mode .priority-medium {
-            background-color: rgba(245, 158, 11, 0.2);
-            color: #fcd34d;
-        }
-        
-        .priority-low {
-            background-color: #dbeafe;
-            color: #1e40af;
-        }
-        
-        .dark-mode .priority-low {
-            background-color: rgba(59, 130, 246, 0.2);
-            color: #93c5fd;
-        }
-        
-        .map-container {
-            height: 200px;
-            background-color: #e5e7eb;
-            border-radius: 12px;
-            overflow: hidden;
-            margin-top: 16px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: var(--text-light);
-        }
-        
-        .dark-mode .map-container {
-            background-color: #334155;
-        }
-        
-        .empty-state {
-            text-align: center;
-            padding: 48px 24px;
-            color: var(--text-light);
-        }
-        
-        .empty-icon {
-            font-size: 48px;
-            color: var(--border-color);
-            margin-bottom: 16px;
+        .tab-button.active::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background-color: var(--primary-color);
         }
         
         .tab-content {
+            padding: 25px;
+        }
+        
+        .tab-pane {
             display: none;
         }
         
-        .tab-content.active {
+        .tab-pane.active {
             display: block;
+            animation: fadeIn 0.5s ease;
         }
         
-        .feedback-section {
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .route-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .route-card {
             background-color: var(--card-bg);
-            border-radius: 16px;
-            padding: 32px;
-            margin-top: 48px;
+            border-radius: 12px;
+            padding: 20px;
             border: 1px solid var(--border-color);
+            transition: all 0.3s ease;
+            position: relative;
         }
         
-        .feedback-title {
-            font-size: 20px;
+        .route-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            border-color: var(--primary-color);
+        }
+        
+        .dark-mode .route-card:hover {
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+        }
+        
+        .route-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+        
+        .route-code {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
             font-weight: 600;
-            margin-bottom: 16px;
+        }
+        
+        .route-name {
+            font-size: 18px;
+            font-weight: 600;
             color: var(--text-color);
+            margin-bottom: 8px;
         }
         
-        .feedback-form {
+        .route-meta {
             display: flex;
-            flex-direction: column;
-            gap: 16px;
-        }
-        
-        .form-group {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        
-        .form-label {
+            gap: 15px;
+            margin-bottom: 15px;
             font-size: 14px;
+            color: var(--text-light);
+        }
+        
+        .meta-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .meta-item i {
+            font-size: 16px;
+        }
+        
+        .route-details {
+            margin-bottom: 20px;
+        }
+        
+        .detail-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .detail-label {
+            color: var(--text-light);
+            font-size: 14px;
+        }
+        
+        .detail-value {
             font-weight: 500;
             color: var(--text-color);
         }
         
-        .form-select, .form-input, .form-textarea {
-            padding: 12px;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            background-color: var(--card-bg);
-            color: var(--text-color);
+        .route-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            border-radius: 6px;
             font-size: 14px;
-        }
-        
-        .form-textarea {
-            min-height: 120px;
-            resize: vertical;
-        }
-        
-        .form-select:focus, .form-input:focus, .form-textarea:focus {
-            outline: none;
-            border-color: var(--primary-color);
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
         }
         
         .btn-primary {
             background-color: var(--primary-color);
             color: white;
-            padding: 12px 24px;
-            border-radius: 8px;
-            border: none;
-            font-weight: 500;
-            cursor: pointer;
-            transition: background-color 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 8px;
         }
         
         .btn-primary:hover {
@@ -1029,80 +1044,319 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
         }
         
         .btn-secondary {
-            background-color: var(--card-bg);
+            background-color: var(--background-color);
             color: var(--text-color);
-            padding: 12px 24px;
-            border-radius: 8px;
             border: 1px solid var(--border-color);
-            font-weight: 500;
-            cursor: pointer;
-            transition: background-color 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 8px;
         }
         
         .btn-secondary:hover {
             background-color: var(--border-color);
         }
         
-        /* Responsive Design */
-        @media (max-width: 1200px) {
-            .cards-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
+        .btn-outline {
+            background-color: transparent;
+            color: var(--primary-color);
+            border: 1px solid var(--primary-color);
+        }
+        
+        .btn-outline:hover {
+            background-color: var(--primary-color);
+            color: white;
+        }
+        
+        .favorite-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: none;
+            border: none;
+            font-size: 20px;
+            color: #e0e0e0;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .favorite-btn.active {
+            color: #ff4757;
+        }
+        
+        .favorite-btn:hover {
+            transform: scale(1.2);
+        }
+        
+        .stops-list {
+            margin-top: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .stop-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            background-color: var(--background-color);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        
+        .stop-number {
+            background-color: var(--primary-color);
+            color: white;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 600;
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+        
+        .stop-info {
+            flex: 1;
+        }
+        
+        .stop-name {
+            font-weight: 500;
+            margin-bottom: 3px;
+        }
+        
+        .stop-location {
+            font-size: 12px;
+            color: var(--text-light);
+        }
+        
+        .terminal-badge {
+            display: inline-block;
+            background-color: #f0fdfa;
+            color: var(--primary-color);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+        
+        .dark-mode .terminal-badge {
+            background-color: rgba(20, 184, 166, 0.2);
+        }
+        
+        .restriction-item {
+            background-color: var(--background-color);
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            border-left: 4px solid #ef4444;
+        }
+        
+        .restriction-type {
+            font-weight: 600;
+            color: #ef4444;
+            margin-bottom: 5px;
+        }
+        
+        .restriction-location {
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        
+        .restriction-details {
+            font-size: 14px;
+            color: var(--text-light);
+        }
+        
+        .update-item {
+            background-color: #f0fdfa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            border-left: 4px solid var(--primary-color);
+        }
+        
+        .dark-mode .update-item {
+            background-color: rgba(20, 184, 166, 0.1);
+        }
+        
+        .update-type {
+            font-weight: 600;
+            color: var(--primary-color);
+            margin-bottom: 5px;
+        }
+        
+        .update-title {
+            font-size: 16px;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+        
+        .update-meta {
+            display: flex;
+            gap: 15px;
+            font-size: 12px;
+            color: var(--text-light);
+            margin-bottom: 10px;
+        }
+        
+        .search-box-btrm {
+            position: relative;
+            margin-bottom: 20px;
+        }
+        
+        .search-box-btrm input {
+            width: 100%;
+            padding: 12px 20px 12px 45px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background-color: var(--card-bg);
+            color: var(--text-color);
+            font-size: 16px;
+        }
+        
+        .search-box-btrm i {
+            position: absolute;
+            left: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-light);
+            font-size: 20px;
+        }
+        
+        .no-data {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-light);
+        }
+        
+        .no-data i {
+            font-size: 48px;
+            margin-bottom: 15px;
+            opacity: 0.5;
+        }
+        
+        .feedback-form {
+            background-color: var(--card-bg);
+            padding: 25px;
+            border-radius: 12px;
+            margin-top: 30px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: var(--text-color);
+        }
+        
+        .form-control {
+            width: 100%;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background-color: var(--card-bg);
+            color: var(--text-color);
+            font-size: 16px;
+        }
+        
+        .form-control:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1);
+        }
+        
+        textarea.form-control {
+            min-height: 120px;
+            resize: vertical;
+        }
+        
+        .info-banner {
+            background-color: #f0fdfa;
+            border: 1px solid #ccfbf1;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .dark-mode .info-banner {
+            background-color: rgba(20, 184, 166, 0.1);
+            border-color: rgba(20, 184, 166, 0.3);
+        }
+        
+        .info-banner i {
+            font-size: 24px;
+            color: var(--primary-color);
+        }
+        
+        .info-content h3 {
+            margin: 0 0 5px 0;
+            font-size: 16px;
+            color: var(--text-color);
+        }
+        
+        .info-content p {
+            margin: 0;
+            font-size: 14px;
+            color: var(--text-light);
+        }
+        
+        .route-search-container {
+            margin-bottom: 20px;
+        }
+        
+        .alert-banner {
+            background-color: #fef3c7;
+            border: 1px solid #fcd34d;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .dark-mode .alert-banner {
+            background-color: rgba(245, 158, 11, 0.1);
+            border-color: rgba(245, 158, 11, 0.3);
+        }
+        
+        .alert-banner i {
+            color: #f59e0b;
+            font-size: 20px;
         }
         
         @media (max-width: 768px) {
-            .container {
-                flex-direction: column;
-            }
-            
-            .sidebar {
-                width: 100%;
-                height: auto;
-                padding: 16px;
-            }
-            
-            .dashboard-content {
-                padding: 16px;
-            }
-            
-            .dashboard-header {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 16px;
-            }
-            
-            .header-content {
-                flex-direction: column;
-                gap: 16px;
-            }
-            
-            .search-container {
-                max-width: 100%;
-            }
-            
-            .header-actions {
-                flex-wrap: wrap;
-                justify-content: flex-end;
-            }
-            
-            .time-display {
-                min-width: 140px;
-            }
-            
-            .cards-grid {
+            .route-grid {
                 grid-template-columns: 1fr;
             }
             
-            .quick-nav {
-                flex-direction: column;
+            .tab-header {
+                flex-wrap: wrap;
             }
             
-            .nav-button {
-                width: 100%;
-                justify-content: center;
+            .tab-button {
+                flex: 1;
+                min-width: 120px;
+                text-align: center;
+                padding: 12px 15px;
+                font-size: 14px;
+            }
+            
+            .route-meta {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            
+            .route-actions {
+                flex-wrap: wrap;
             }
         }
     </style>
@@ -1114,7 +1368,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
             <!-- Logo -->
             <div class="logo">
                 <div class="logo-icon">
-                    <img src="../../img/ttm.png" alt="TTM Logo" style="width: 80px; height: 80px;">
+                    <img src="../img/ttm.png" alt="TTM Logo" style="width: 80px; height: 80px;">
                 </div>
                 <span class="logo-text"> Barangay Resident Portal</span>
             </div>
@@ -1124,7 +1378,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
                 <p class="menu-title">BARANGAY SERVICES</p>
                 
                 <div class="menu-items">
-                    <!-- Dashboard Button -->
+                    <!-- Dashboard Button (Added as first item) -->
                     <a href="user_dashboard.php" class="menu-item <?php echo $current_page == 'dashboard' ? 'active' : ''; ?>">
                         <div class="icon-box icon-box-dashboard">
                             <i class='bx bxs-dashboard'></i>
@@ -1132,19 +1386,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
                         <span class="font-medium">Dashboard</span>
                     </a>
                     
-                    <!-- Tricycle Route Information -->
+                    <!-- 2.1 View Route Information -->
                     <div class="menu-item active" onclick="toggleSubmenu('route-info')">
                         <div class="icon-box icon-box-route-info">
                             <i class='bx bxs-map-alt'></i>
                         </div>
-                        <span class="font-medium">Tricycle Route Information</span>
+                        <span class="font-medium">Tricycle Route Info</span>
                         <svg class="dropdown-arrow menu-icon rotated" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
                         </svg>
                     </div>
                     <div id="route-info" class="submenu active">
-                        <a href="btrm/tricycle_route_info.php" class="submenu-item active">View Routes & Terminals</a>
-                        <a href="user_routes/schedule.php" class="submenu-item">Schedule Information</a>
+                        <a href="btrm/tricycle_route_info.php" class="submenu-item active">View Routes & Info</a>
+                        <a href="user_routes/schedule.php" class="submenu-item">Schedule Info</a>
                     </div>
                     
                     <!-- 2.2 Report Road Condition -->
@@ -1270,7 +1524,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
                             <svg class="search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
                             </svg>
-                            <input type="text" placeholder="Search routes or terminals" class="search-input" id="searchInput">
+                            <input type="text" placeholder="Search routes or services" class="search-input">
                             <kbd class="search-shortcut">🔍</kbd>
                         </div>
                     </div>
@@ -1308,400 +1562,481 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
                 </div>
             </div>
             
-            <!-- Dashboard Content -->
+            <!-- BTRM Content -->
             <div class="dashboard-content">
                 <!-- Title and Actions -->
                 <div class="dashboard-header">
                     <div>
-                        <h1 class="dashboard-title">Tricycle Route Information</h1>
-                        <p class="dashboard-subtitle">View approved routes, terminals, restrictions, and service updates in <?php echo htmlspecialchars($barangay['name'] ?? 'your barangay'); ?></p>
+                        <h1 class="dashboard-title">Barangay Tricycle Route Management</h1>
+                        <p class="dashboard-subtitle">View approved routes, terminals, restrictions, and service updates in your barangay</p>
                     </div>
                     <div class="dashboard-actions">
-                        <button class="primary-button" onclick="window.location.href='user_feedback/submit_feedback.php'">
-                            <span style="font-size: 20px;">+</span>
+                        <button class="primary-button" onclick="switchTab('feedback')">
+                            <i class='bx bxs-message-alt-add'></i>
                             Submit Feedback
                         </button>
-                        <button class="secondary-button" onclick="printRouteInfo()">
-                            <i class='bx bx-printer'></i>
-                            Print Information
+                        <button class="secondary-button" onclick="printPage()">
+                            <i class='bx bxs-printer'></i>
+                            Print Info
                         </button>
                     </div>
                 </div>
-                
-                <!-- Quick Navigation -->
-                <div class="quick-nav">
-                    <button class="nav-button active" onclick="showTab('routes')" id="tab-routes">
-                        <i class='bx bx-map'></i>
-                        Approved Routes
-                    </button>
-                    <button class="nav-button" onclick="showTab('terminals')" id="tab-terminals">
-                        <i class='bx bx-current-location'></i>
-                        Terminal Locator
-                    </button>
-                    <button class="nav-button" onclick="showTab('restrictions')" id="tab-restrictions">
-                        <i class='bx bx-no-entry'></i>
-                        Route Restrictions
-                    </button>
-                    <button class="nav-button" onclick="showTab('updates')" id="tab-updates">
-                        <i class='bx bx-news'></i>
-                        Service Updates
-                    </button>
+
+                <!-- Info Banner -->
+                <div class="info-banner">
+                    <i class='bx bx-info-circle'></i>
+                    <div class="info-content">
+                        <h3>Important Information</h3>
+                        <p>All tricycle routes are regulated by the Barangay Transport Management. Report any violations or issues using the feedback form.</p>
+                    </div>
                 </div>
-                
-                <!-- Tab Content -->
-                <div id="tab-content">
-                    <!-- Approved Routes Tab -->
-                    <div class="tab-content active" id="routes-tab">
-                        <h2 class="section-title">
-                            <i class='bx bx-map'></i>
-                            Approved Tricycle Routes
-                        </h2>
-                        
-                        <?php if (empty($routes)): ?>
-                            <div class="empty-state">
-                                <div class="empty-icon">
-                                    <i class='bx bx-map-alt'></i>
+
+                <!-- Alert Banner for Route Changes -->
+                <?php if (!empty($updates)): ?>
+                <div class="alert-banner">
+                    <i class='bx bxs-bell-ring'></i>
+                    <div>
+                        <strong>Service Updates Available:</strong> There are <?php echo count($updates); ?> active service updates or advisories for your barangay.
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <!-- Tab Container -->
+                <div class="tab-container">
+                    <div class="tab-header">
+                        <button class="tab-button active" onclick="switchTab('routes')">
+                            <i class='bx bx-map'></i> Approved Routes
+                        </button>
+                        <button class="tab-button" onclick="switchTab('terminals')">
+                            <i class='bx bx-buildings'></i> Terminals & Stops
+                        </button>
+                        <button class="tab-button" onclick="switchTab('restrictions')">
+                            <i class='bx bx-no-entry'></i> Route Restrictions
+                        </button>
+                        <button class="tab-button" onclick="switchTab('updates')">
+                            <i class='bx bx-news'></i> Service Updates
+                            <?php if (!empty($updates)): ?>
+                                <span style="background-color: #ef4444; color: white; padding: 2px 6px; border-radius: 10px; font-size: 12px; margin-left: 5px;">
+                                    <?php echo count($updates); ?>
+                                </span>
+                            <?php endif; ?>
+                        </button>
+                        <button class="tab-button" onclick="switchTab('feedback')">
+                            <i class='bx bx-message-square'></i> Submit Feedback
+                        </button>
+                    </div>
+
+                    <div class="tab-content">
+                        <!-- Tab 1: Approved Routes -->
+                        <div id="routes" class="tab-pane active">
+                            <div class="route-search-container">
+                                <div class="search-box-btrm">
+                                    <i class='bx bx-search'></i>
+                                    <input type="text" id="route-search" placeholder="Search routes by name or code...">
                                 </div>
-                                <h3>No Routes Available</h3>
-                                <p>There are no approved tricycle routes in your barangay at the moment.</p>
                             </div>
-                        <?php else: ?>
-                            <div class="cards-grid">
-                                <?php foreach ($routes as $route): ?>
-                                    <div class="info-card">
-                                        <div class="card-header">
-                                            <h3 class="card-title"><?php echo htmlspecialchars($route['route_name']); ?></h3>
-                                            <span class="card-badge badge-active">Active</span>
-                                        </div>
-                                        <div class="card-content">
-                                            <div class="card-item">
-                                                <span class="item-label">Route Code:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($route['route_code']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Start Point:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($route['start_point']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">End Point:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($route['end_point']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Distance:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($route['distance_km']); ?> km</span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Fare:</span>
-                                                <span class="item-value">₱<?php echo htmlspecialchars($route['fare_regular']); ?> (Regular)</span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Operating Hours:</span>
-                                                <span class="item-value">
-                                                    <?php echo date('g:i A', strtotime($route['operating_hours_start'])); ?> - 
-                                                    <?php echo date('g:i A', strtotime($route['operating_hours_end'])); ?>
-                                                </span>
-                                            </div>
-                                        </div>
-                                        <div class="route-stops">
-                                            <p style="font-size: 14px; color: var(--text-light); margin-bottom: 12px;">Route Stops:</p>
-                                            <?php 
-                                            // Fetch stops for this route
-                                            $sql_stops = "SELECT * FROM route_stops WHERE route_id = :route_id ORDER BY stop_number";
-                                            $stmt_stops = $pdo->prepare($sql_stops);
-                                            $stmt_stops->execute(['route_id' => $route['id']]);
-                                            $stops = $stmt_stops->fetchAll(PDO::FETCH_ASSOC);
+                            
+                            <?php if (empty($routes)): ?>
+                                <div class="no-data">
+                                    <i class='bx bx-map-alt'></i>
+                                    <h3>No Active Routes Found</h3>
+                                    <p>There are currently no approved tricycle routes in your barangay.</p>
+                                </div>
+                            <?php else: ?>
+                                <div class="route-grid" id="route-list">
+                                    <?php foreach ($routes as $route): ?>
+                                        <div class="route-card" data-route-name="<?php echo strtolower($route['route_name']); ?>" data-route-code="<?php echo strtolower($route['route_code']); ?>">
+                                            <?php if (isset($_SESSION['user_id'])): ?>
+                                            <button class="favorite-btn <?php echo isset($saved_routes[$route['id']]) ? 'active' : ''; ?>" 
+                                                    data-route-id="<?php echo $route['id']; ?>"
+                                                    onclick="toggleFavorite(<?php echo $route['id']; ?>)">
+                                                <i class='bx <?php echo isset($saved_routes[$route['id']]) ? 'bxs-heart' : 'bx-heart'; ?>'></i>
+                                            </button>
+                                            <?php endif; ?>
                                             
-                                            if (!empty($stops)) {
-                                                foreach ($stops as $stop):
-                                            ?>
-                                                <div class="stop-item">
-                                                    <div class="stop-number"><?php echo $stop['stop_number']; ?></div>
-                                                    <div>
-                                                        <div><?php echo htmlspecialchars($stop['stop_name']); ?></div>
-                                                        <div style="font-size: 12px; color: var(--text-light);"><?php echo htmlspecialchars($stop['location']); ?></div>
+                                            <div class="route-card-header">
+                                                <div>
+                                                    <div class="route-code"><?php echo htmlspecialchars($route['route_code']); ?></div>
+                                                    <h3 class="route-name"><?php echo htmlspecialchars($route['route_name']); ?></h3>
+                                                    <div class="route-meta">
+                                                        <div class="meta-item">
+                                                            <i class='bx bx-time'></i>
+                                                            <span><?php echo htmlspecialchars($route['estimated_time_min']); ?> min</span>
+                                                        </div>
+                                                        <div class="meta-item">
+                                                            <i class='bx bx-road'></i>
+                                                            <span><?php echo htmlspecialchars($route['distance_km']); ?> km</span>
+                                                        </div>
+                                                        <div class="meta-item">
+                                                            <i class='bx bx-car'></i>
+                                                            <span><?php echo htmlspecialchars($route['active_operators']); ?> operators</span>
+                                                        </div>
                                                     </div>
                                                 </div>
-                                            <?php 
-                                                endforeach;
-                                            } else {
-                                                echo '<p style="color: var(--text-light); font-size: 14px;">No stops defined for this route.</p>';
-                                            }
-                                            ?>
+                                            </div>
+
+                                            <div class="route-details">
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Start Point:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($route['start_point']); ?></span>
+                                                </div>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">End Point:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($route['end_point']); ?></span>
+                                                </div>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Regular Fare:</span>
+                                                    <span class="detail-value">₱<?php echo number_format($route['fare_regular'], 2); ?></span>
+                                                </div>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Special Fare:</span>
+                                                    <span class="detail-value">₱<?php echo number_format($route['fare_special'], 2); ?></span>
+                                                </div>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Operating Hours:</span>
+                                                    <span class="detail-value"><?php echo date('g:i A', strtotime($route['operating_hours_start'])); ?> - <?php echo date('g:i A', strtotime($route['operating_hours_end'])); ?></span>
+                                                </div>
+                                            </div>
+
+                                            <div class="route-actions">
+                                                <button class="btn btn-primary" onclick="viewRouteStops(<?php echo $route['id']; ?>)">
+                                                    <i class='bx bx-list-ul'></i> View Stops
+                                                </button>
+                                                <button class="btn btn-secondary" onclick="showRouteDetails(<?php echo $route['id']; ?>, '<?php echo htmlspecialchars($route['route_name']); ?>')">
+                                                    <i class='bx bx-detail'></i> Details
+                                                </button>
+                                            </div>
+
+                                            <!-- Hidden stops list -->
+                                            <div class="stops-list" id="stops-<?php echo $route['id']; ?>" style="display: none;">
+                                                <?php if (isset($route_stops[$route['id']])): ?>
+                                                    <?php foreach ($route_stops[$route['id']] as $stop): ?>
+                                                        <div class="stop-item">
+                                                            <div class="stop-number"><?php echo $stop['stop_number']; ?></div>
+                                                            <div class="stop-info">
+                                                                <div class="stop-name">
+                                                                    <?php echo htmlspecialchars($stop['stop_name']); ?>
+                                                                    <?php if ($stop['is_terminal']): ?>
+                                                                        <span class="terminal-badge">Terminal</span>
+                                                                    <?php endif; ?>
+                                                                </div>
+                                                                <div class="stop-location"><?php echo htmlspecialchars($stop['location']); ?></div>
+                                                                <?php if ($stop['fare_from_start'] > 0): ?>
+                                                                    <div class="stop-fare" style="font-size: 12px; color: var(--primary-color); margin-top: 3px;">
+                                                                        Fare: ₱<?php echo number_format($stop['fare_from_start'], 2); ?>
+                                                                    </div>
+                                                                <?php endif; ?>
+                                                            </div>
+                                                        </div>
+                                                    <?php endforeach; ?>
+                                                <?php else: ?>
+                                                    <div class="no-data" style="padding: 20px;">
+                                                        <i class='bx bx-map-pin'></i>
+                                                        <p>No stops defined for this route</p>
+                                                    </div>
+                                                <?php endif; ?>
+                                            </div>
                                         </div>
-                                    </div>
-                                <?php endforeach; ?>
-                            </div>
-                        <?php endif; ?>
-                    </div>
-                    
-                    <!-- Terminal Locator Tab -->
-                    <div class="tab-content" id="terminals-tab">
-                        <h2 class="section-title">
-                            <i class='bx bx-current-location'></i>
-                            Terminal & Stop Locator
-                        </h2>
-                        
-                        <?php if (empty($terminals)): ?>
-                            <div class="empty-state">
-                                <div class="empty-icon">
-                                    <i class='bx bx-current-location'></i>
+                                    <?php endforeach; ?>
                                 </div>
-                                <h3>No Terminals Available</h3>
-                                <p>There are no active terminals in your barangay at the moment.</p>
-                            </div>
-                        <?php else: ?>
-                            <div class="cards-grid">
-                                <?php foreach ($terminals as $terminal): ?>
-                                    <div class="info-card terminal-card">
-                                        <div class="terminal-marker">
-                                            <i class='bx bx-map-pin'></i>
-                                        </div>
-                                        <div class="card-header">
-                                            <h3 class="card-title"><?php echo htmlspecialchars($terminal['terminal_name']); ?></h3>
-                                            <span class="card-badge badge-active">Operational</span>
-                                        </div>
-                                        <div class="card-content">
-                                            <div class="card-item">
-                                                <span class="item-label">Terminal Code:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($terminal['terminal_code']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Type:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($terminal['terminal_type']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Location:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($terminal['location']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Capacity:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($terminal['capacity'] ?? 'N/A'); ?> vehicles</span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Operating Hours:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($terminal['operating_hours'] ?? '24/7'); ?></span>
-                                            </div>
-                                            <?php if ($terminal['contact_person']): ?>
-                                                <div class="card-item">
-                                                    <span class="item-label">Contact Person:</span>
-                                                    <span class="item-value"><?php echo htmlspecialchars($terminal['contact_person']); ?></span>
+                            <?php endif; ?>
+                        </div>
+
+                        <!-- Tab 2: Terminals & Stops -->
+                        <div id="terminals" class="tab-pane">
+                            <h2 style="font-size: 24px; font-weight: 600; margin-bottom: 20px; color: var(--text-color);">Terminals</h2>
+                            <?php if (empty($terminals)): ?>
+                                <div class="no-data">
+                                    <i class='bx bx-building-house'></i>
+                                    <h3>No Terminals Found</h3>
+                                    <p>There are currently no active terminals in your barangay.</p>
+                                </div>
+                            <?php else: ?>
+                                <div class="route-grid">
+                                    <?php foreach ($terminals as $terminal): ?>
+                                        <div class="route-card">
+                                            <div class="route-card-header">
+                                                <div>
+                                                    <div class="route-code"><?php echo htmlspecialchars($terminal['terminal_code']); ?></div>
+                                                    <h3 class="route-name"><?php echo htmlspecialchars($terminal['terminal_name']); ?></h3>
+                                                    <div class="route-meta">
+                                                        <div class="meta-item">
+                                                            <i class='bx bx-buildings'></i>
+                                                            <span><?php echo htmlspecialchars($terminal['terminal_type']); ?></span>
+                                                        </div>
+                                                        <div class="meta-item">
+                                                            <i class='bx bx-car'></i>
+                                                            <span>Capacity: <?php echo htmlspecialchars($terminal['capacity']); ?> vehicles</span>
+                                                        </div>
+                                                    </div>
                                                 </div>
-                                            <?php endif; ?>
-                                            <?php if ($terminal['contact_number']): ?>
-                                                <div class="card-item">
-                                                    <span class="item-label">Contact Number:</span>
-                                                    <span class="item-value"><?php echo htmlspecialchars($terminal['contact_number']); ?></span>
+                                            </div>
+
+                                            <div class="route-details">
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Location:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($terminal['location']); ?></span>
                                                 </div>
-                                            <?php endif; ?>
-                                        </div>
-                                        <div class="map-container">
-                                            <div style="text-align: center;">
-                                                <i class='bx bx-map-alt' style="font-size: 48px; margin-bottom: 16px;"></i>
-                                                <p>Map view for: <?php echo htmlspecialchars($terminal['terminal_name']); ?></p>
-                                                <p style="font-size: 12px; margin-top: 8px;">
-                                                    <?php if ($terminal['latitude'] && $terminal['longitude']): ?>
-                                                        Coordinates: <?php echo htmlspecialchars($terminal['latitude']); ?>, 
-                                                        <?php echo htmlspecialchars($terminal['longitude']); ?>
-                                                    <?php else: ?>
-                                                        Coordinates not available
-                                                    <?php endif; ?>
-                                                </p>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Operating Hours:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($terminal['operating_hours']); ?></span>
+                                                </div>
+                                                <?php if ($terminal['contact_person']): ?>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Contact Person:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($terminal['contact_person']); ?></span>
+                                                </div>
+                                                <?php endif; ?>
+                                                <?php if ($terminal['contact_number']): ?>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Contact Number:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($terminal['contact_number']); ?></span>
+                                                </div>
+                                                <?php endif; ?>
+                                                <?php if ($terminal['amenities']): ?>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Amenities:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($terminal['amenities']); ?></span>
+                                                </div>
+                                                <?php endif; ?>
                                             </div>
                                         </div>
-                                    </div>
-                                <?php endforeach; ?>
-                            </div>
-                        <?php endif; ?>
-                    </div>
-                    
-                    <!-- Route Restrictions Tab -->
-                    <div class="tab-content" id="restrictions-tab">
-                        <h2 class="section-title">
-                            <i class='bx bx-no-entry'></i>
-                            Route Restrictions Notice
-                        </h2>
-                        
-                        <?php if (empty($restrictions)): ?>
-                            <div class="empty-state">
-                                <div class="empty-icon">
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+
+                            <h2 style="font-size: 24px; font-weight: 600; margin-top: 40px; margin-bottom: 20px; color: var(--text-color);">Loading Zones</h2>
+                            <?php if (empty($loading_zones)): ?>
+                                <div class="no-data">
+                                    <i class='bx bx-map-pin'></i>
+                                    <h3>No Loading Zones Found</h3>
+                                    <p>There are currently no active loading zones in your barangay.</p>
+                                </div>
+                            <?php else: ?>
+                                <div class="route-grid">
+                                    <?php foreach ($loading_zones as $zone): ?>
+                                        <div class="route-card">
+                                            <div class="route-card-header">
+                                                <div>
+                                                    <div class="route-code"><?php echo htmlspecialchars($zone['zone_code']); ?></div>
+                                                    <h3 class="route-name"><?php echo htmlspecialchars($zone['zone_name']); ?></h3>
+                                                    <div class="route-meta">
+                                                        <div class="meta-item">
+                                                            <i class='bx bx-map-pin'></i>
+                                                            <span>Loading Zone</span>
+                                                        </div>
+                                                        <div class="meta-item">
+                                                            <i class='bx bx-car'></i>
+                                                            <span>Capacity: <?php echo htmlspecialchars($zone['capacity']); ?> vehicles</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div class="route-details">
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Location:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($zone['location']); ?></span>
+                                                </div>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Operating Hours:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($zone['operating_hours']); ?></span>
+                                                </div>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Allowed Vehicles:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($zone['allowed_vehicle_types']); ?></span>
+                                                </div>
+                                                <?php if ($zone['restrictions']): ?>
+                                                <div class="detail-item">
+                                                    <span class="detail-label">Restrictions:</span>
+                                                    <span class="detail-value"><?php echo htmlspecialchars($zone['restrictions']); ?></span>
+                                                </div>
+                                                <?php endif; ?>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+
+                        <!-- Tab 3: Route Restrictions -->
+                        <div id="restrictions" class="tab-pane">
+                            <h2 style="font-size: 24px; font-weight: 600; margin-bottom: 10px; color: var(--text-color);">Active Route Restrictions</h2>
+                            <p style="color: var(--text-light); margin-bottom: 20px;">Roads where tricycles are not allowed or have special restrictions</p>
+                            
+                            <?php if (empty($restrictions)): ?>
+                                <div class="no-data">
                                     <i class='bx bx-no-entry'></i>
+                                    <h3>No Active Restrictions</h3>
+                                    <p>There are currently no active route restrictions in your barangay.</p>
                                 </div>
-                                <h3>No Active Restrictions</h3>
-                                <p>There are no active route restrictions in your barangay at the moment.</p>
-                            </div>
-                        <?php else: ?>
-                            <div class="cards-grid">
+                            <?php else: ?>
                                 <?php foreach ($restrictions as $restriction): ?>
-                                    <div class="info-card restriction-card">
-                                        <div class="card-header">
-                                            <h3 class="card-title"><?php echo htmlspecialchars($restriction['restriction_type']); ?></h3>
-                                            <span class="card-badge badge-active">Active</span>
-                                        </div>
-                                        <div class="card-content">
-                                            <div class="card-item">
-                                                <span class="item-label">Road Name:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($restriction['road_name']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Location:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($restriction['location']); ?></span>
-                                            </div>
+                                    <div class="restriction-item">
+                                        <div class="restriction-type">
+                                            <?php echo htmlspecialchars($restriction['restriction_type']); ?>
                                             <?php if ($restriction['route_name']): ?>
-                                                <div class="card-item">
-                                                    <span class="item-label">Affected Route:</span>
-                                                    <span class="item-value"><?php echo htmlspecialchars($restriction['route_name']); ?></span>
-                                                </div>
+                                                <span style="color: var(--text-light); font-size: 14px; margin-left: 10px;">
+                                                    (Route: <?php echo htmlspecialchars($restriction['route_name']); ?>)
+                                                </span>
                                             <?php endif; ?>
-                                            <div class="card-item">
-                                                <span class="item-label">Description:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($restriction['description']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Effective Date:</span>
-                                                <span class="item-value"><?php echo date('F j, Y', strtotime($restriction['effective_date'])); ?></span>
-                                            </div>
-                                            <?php if ($restriction['expiry_date']): ?>
-                                                <div class="card-item">
-                                                    <span class="item-label">Expiry Date:</span>
-                                                    <span class="item-value"><?php echo date('F j, Y', strtotime($restriction['expiry_date'])); ?></span>
-                                                </div>
+                                        </div>
+                                        <div class="restriction-location">
+                                            <strong><?php echo htmlspecialchars($restriction['road_name']); ?></strong> - 
+                                            <?php echo htmlspecialchars($restriction['location']); ?>
+                                        </div>
+                                        <div class="restriction-details">
+                                            <?php echo htmlspecialchars($restriction['description']); ?>
+                                        </div>
+                                        <div style="margin-top: 10px; font-size: 14px;">
+                                            <span style="color: var(--text-light);">
+                                                Effective: <?php echo date('M d, Y', strtotime($restriction['effective_date'])); ?>
+                                                <?php if ($restriction['expiry_date']): ?>
+                                                    to <?php echo date('M d, Y', strtotime($restriction['expiry_date'])); ?>
+                                                <?php endif; ?>
+                                            </span>
+                                            <?php if ($restriction['restriction_time_start']): ?>
+                                                <span style="color: var(--text-light); margin-left: 15px;">
+                                                    Time: <?php echo date('g:i A', strtotime($restriction['restriction_time_start'])); ?> 
+                                                    to <?php echo date('g:i A', strtotime($restriction['restriction_time_end'])); ?>
+                                                </span>
                                             <?php endif; ?>
-                                            <?php if ($restriction['restriction_time_start'] && $restriction['restriction_time_end']): ?>
-                                                <div class="restriction-time">
-                                                    Time: <?php echo date('g:i A', strtotime($restriction['restriction_time_start'])); ?> - 
-                                                    <?php echo date('g:i A', strtotime($restriction['restriction_time_end'])); ?>
-                                                </div>
-                                            <?php endif; ?>
-                                            <?php if ($restriction['penalty_amount']): ?>
-                                                <div class="card-item">
-                                                    <span class="item-label">Penalty:</span>
-                                                    <span class="item-value">₱<?php echo number_format($restriction['penalty_amount'], 2); ?></span>
-                                                </div>
+                                            <?php if ($restriction['penalty_amount'] > 0): ?>
+                                                <span style="color: #ef4444; margin-left: 15px; font-weight: 600;">
+                                                    Penalty: ₱<?php echo number_format($restriction['penalty_amount'], 2); ?>
+                                                </span>
                                             <?php endif; ?>
                                         </div>
                                     </div>
                                 <?php endforeach; ?>
-                            </div>
-                        <?php endif; ?>
-                    </div>
-                    
-                    <!-- Service Updates Tab -->
-                    <div class="tab-content" id="updates-tab">
-                        <h2 class="section-title">
-                            <i class='bx bx-news'></i>
-                            Service Updates & Notices
-                        </h2>
-                        
-                        <?php if (empty($updates)): ?>
-                            <div class="empty-state">
-                                <div class="empty-icon">
+                            <?php endif; ?>
+                        </div>
+
+                        <!-- Tab 4: Service Updates -->
+                        <div id="updates" class="tab-pane">
+                            <h2 style="font-size: 24px; font-weight: 600; margin-bottom: 10px; color: var(--text-color);">Service Updates & Advisories</h2>
+                            <p style="color: var(--text-light); margin-bottom: 20px;">Latest route changes, advisories, and important notices</p>
+                            
+                            <?php if (empty($updates)): ?>
+                                <div class="no-data">
                                     <i class='bx bx-news'></i>
+                                    <h3>No Updates Available</h3>
+                                    <p>There are currently no service updates or advisories for your barangay.</p>
                                 </div>
-                                <h3>No Service Updates</h3>
-                                <p>There are no active service updates at the moment.</p>
-                            </div>
-                        <?php else: ?>
-                            <div class="cards-grid">
+                            <?php else: ?>
                                 <?php foreach ($updates as $update): ?>
-                                    <div class="info-card update-card">
-                                        <div class="card-header">
-                                            <h3 class="card-title"><?php echo htmlspecialchars($update['title']); ?></h3>
-                                            <span class="card-badge badge-active">Active</span>
-                                        </div>
-                                        <div class="card-content">
-                                            <div class="card-item">
-                                                <span class="item-label">Update Type:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($update['update_type']); ?></span>
-                                            </div>
+                                    <div class="update-item">
+                                        <div class="update-type">
+                                            <?php echo htmlspecialchars($update['update_type']); ?>
                                             <?php if ($update['route_name']): ?>
-                                                <div class="card-item">
-                                                    <span class="item-label">Affected Route:</span>
-                                                    <span class="item-value"><?php echo htmlspecialchars($update['route_name']); ?></span>
-                                                </div>
+                                                <span style="color: var(--text-light); font-size: 14px; margin-left: 10px;">
+                                                    (Affected Route: <?php echo htmlspecialchars($update['route_name']); ?>)
+                                                </span>
                                             <?php endif; ?>
-                                            <?php if ($update['terminal_name']): ?>
-                                                <div class="card-item">
-                                                    <span class="item-label">Affected Terminal:</span>
-                                                    <span class="item-value"><?php echo htmlspecialchars($update['terminal_name']); ?></span>
-                                                </div>
+                                            <?php if ($update['priority'] == 'High'): ?>
+                                                <span style="color: #f59e0b; margin-left: 10px;">
+                                                    <i class='bx bxs-error'></i> High Priority
+                                                </span>
+                                            <?php elseif ($update['priority'] == 'Emergency'): ?>
+                                                <span style="color: #ef4444; margin-left: 10px;">
+                                                    <i class='bx bxs-error-circle'></i> Emergency
+                                                </span>
                                             <?php endif; ?>
-                                            <div class="card-item">
-                                                <span class="item-label">Description:</span>
-                                                <span class="item-value"><?php echo htmlspecialchars($update['description']); ?></span>
-                                            </div>
-                                            <div class="card-item">
-                                                <span class="item-label">Effective Date:</span>
-                                                <span class="item-value"><?php echo date('F j, Y', strtotime($update['effective_date'])); ?></span>
-                                            </div>
-                                            <?php if ($update['expiry_date']): ?>
-                                                <div class="card-item">
-                                                    <span class="item-label">Expiry Date:</span>
-                                                    <span class="item-value"><?php echo date('F j, Y', strtotime($update['expiry_date'])); ?></span>
-                                                </div>
+                                        </div>
+                                        <h3 class="update-title"><?php echo htmlspecialchars($update['title']); ?></h3>
+                                        <div class="update-meta">
+                                            <span>
+                                                <i class='bx bx-calendar'></i> 
+                                                Effective: <?php echo date('M d, Y', strtotime($update['effective_date'])); ?>
+                                            </span>
+                                            <?php if ($update['end_date']): ?>
+                                                <span>
+                                                    <i class='bx bx-calendar-event'></i> 
+                                                    Until: <?php echo date('M d, Y', strtotime($update['end_date'])); ?>
+                                                </span>
                                             <?php endif; ?>
-                                            <div class="update-priority priority-<?php echo strtolower($update['priority']); ?>">
-                                                Priority: <?php echo htmlspecialchars($update['priority']); ?>
-                                            </div>
+                                        </div>
+                                        <div class="update-details">
+                                            <?php echo nl2br(htmlspecialchars($update['description'])); ?>
                                         </div>
                                     </div>
                                 <?php endforeach; ?>
+                            <?php endif; ?>
+                        </div>
+
+                        <!-- Tab 5: Submit Feedback -->
+                        <div id="feedback" class="tab-pane">
+                            <h2 style="font-size: 24px; font-weight: 600; margin-bottom: 10px; color: var(--text-color);">Submit Route Feedback</h2>
+                            <p style="color: var(--text-light); margin-bottom: 20px;">Report issues, suggest improvements, or provide feedback about tricycle services</p>
+                            
+                            <div class="feedback-form">
+                                <form id="routeFeedbackForm">
+                                    <div class="form-group">
+                                        <label class="form-label">Feedback Type *</label>
+                                        <select class="form-control" name="feedback_type" id="feedback_type" required>
+                                            <option value="">Select type</option>
+                                            <option value="Route Suggestion">Route Suggestion</option>
+                                            <option value="Complaint">Complaint</option>
+                                            <option value="Compliment">Compliment</option>
+                                            <option value="Question">Question</option>
+                                            <option value="Report Issue">Report Issue</option>
+                                        </select>
+                                    </div>
+
+                                    <div class="form-group">
+                                        <label class="form-label">Related Route (Optional)</label>
+                                        <select class="form-control" name="route_id" id="route_id">
+                                            <option value="">Select route (if applicable)</option>
+                                            <?php foreach ($routes as $route): ?>
+                                                <option value="<?php echo $route['id']; ?>">
+                                                    <?php echo htmlspecialchars($route['route_code'] . ' - ' . $route['route_name']); ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+
+                                    <div class="form-group">
+                                        <label class="form-label">Subject *</label>
+                                        <input type="text" class="form-control" name="subject" id="subject" 
+                                               placeholder="Brief description of your feedback" required>
+                                    </div>
+
+                                    <div class="form-group">
+                                        <label class="form-label">Message *</label>
+                                        <textarea class="form-control" name="message" id="message" 
+                                                  placeholder="Provide detailed information about your feedback, including location, time, and any other relevant details..." 
+                                                  required></textarea>
+                                    </div>
+
+                                    <div class="form-group">
+                                        <label class="form-label">Location (Optional)</label>
+                                        <input type="text" class="form-control" name="location" id="location" 
+                                               placeholder="Where did this happen?">
+                                    </div>
+
+                                    <div class="form-group">
+                                        <label class="form-label">Incident Date (Optional)</label>
+                                        <input type="datetime-local" class="form-control" name="incident_date" id="incident_date">
+                                    </div>
+
+                                    <div class="form-group">
+                                        <label class="form-label">Vehicle Number (Optional)</label>
+                                        <input type="text" class="form-control" name="vehicle_number" id="vehicle_number" 
+                                               placeholder="e.g., TRC-123">
+                                    </div>
+
+                                    <div class="form-group" style="margin-top: 30px;">
+                                        <button type="submit" class="btn btn-primary" style="padding: 12px 30px;">
+                                            <i class='bx bx-send'></i> Submit Feedback
+                                        </button>
+                                        <button type="reset" class="btn btn-secondary" style="margin-left: 10px;">
+                                            <i class='bx bx-reset'></i> Clear Form
+                                        </button>
+                                    </div>
+                                </form>
                             </div>
-                        <?php endif; ?>
+                        </div>
                     </div>
-                </div>
-                
-                <!-- Feedback Section -->
-                <div class="feedback-section">
-                    <h2 class="feedback-title">Have Feedback About Our Tricycle Services?</h2>
-                    <p style="color: var(--text-light); margin-bottom: 24px;">Share your suggestions, report issues, or ask questions about tricycle routes and services.</p>
-                    
-                    <?php if (isset($feedback_success) && $feedback_success): ?>
-                        <div style="background-color: #dcfce7; color: #166534; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
-                            <i class='bx bx-check-circle' style="margin-right: 8px;"></i>
-                            <?php echo htmlspecialchars($feedback_message); ?>
-                        </div>
-                    <?php elseif (isset($feedback_error) && $feedback_error): ?>
-                        <div style="background-color: #fee2e2; color: #991b1b; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
-                            <i class='bx bx-error-circle' style="margin-right: 8px;"></i>
-                            <?php echo htmlspecialchars($feedback_message); ?>
-                        </div>
-                    <?php endif; ?>
-                    
-                    <form class="feedback-form" method="POST" action="">
-                        <input type="hidden" name="submit_feedback" value="1">
-                        
-                        <div class="form-group">
-                            <label class="form-label">Feedback Type</label>
-                            <select class="form-select" name="feedback_type" required>
-                                <option value="">Select type...</option>
-                                <option value="Route Suggestion">Route Suggestion</option>
-                                <option value="Terminal Issue">Terminal Issue</option>
-                                <option value="Restriction Concern">Restriction Concern</option>
-                                <option value="Service Complaint">Service Complaint</option>
-                                <option value="General Feedback">General Feedback</option>
-                            </select>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label class="form-label">Subject</label>
-                            <input type="text" class="form-input" name="subject" placeholder="Brief description of your feedback" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label class="form-label">Message</label>
-                            <textarea class="form-textarea" name="message" placeholder="Please provide details about your feedback..." required></textarea>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label class="form-label">Suggestion (Optional)</label>
-                            <textarea class="form-textarea" name="suggestion" placeholder="Any suggestions for improvement?"></textarea>
-                        </div>
-                        
-                        <button type="submit" class="btn-primary" style="align-self: flex-start;">
-                            <i class='bx bx-send'></i>
-                            Submit Feedback
-                        </button>
-                    </form>
                 </div>
             </div>
         </div>
@@ -1789,124 +2124,273 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_feedback'])) {
         // Update time immediately and then every second
         updateTime();
         setInterval(updateTime, 1000);
+
+        // BTRM Specific Functions
         
-        // Tab navigation
-        function showTab(tabName) {
-            // Update active tab button
-            document.querySelectorAll('.nav-button').forEach(btn => {
-                btn.classList.remove('active');
+        // Tab switching function
+        function switchTab(tabId) {
+            // Hide all tab panes
+            document.querySelectorAll('.tab-pane').forEach(pane => {
+                pane.classList.remove('active');
             });
-            document.getElementById('tab-' + tabName).classList.add('active');
             
-            // Show active tab content
-            document.querySelectorAll('.tab-content').forEach(content => {
-                content.classList.remove('active');
+            // Remove active class from all tab buttons
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.classList.remove('active');
             });
-            document.getElementById(tabName + '-tab').classList.add('active');
             
-            // Save active tab to localStorage
-            localStorage.setItem('activeRouteTab', tabName);
+            // Show selected tab pane
+            document.getElementById(tabId).classList.add('active');
+            
+            // Add active class to clicked tab button
+            event.currentTarget.classList.add('active');
         }
-        
-        // Load saved tab preference
-        const savedTab = localStorage.getItem('activeRouteTab');
-        if (savedTab) {
-            showTab(savedTab);
-        }
-        
-        // Search functionality
-        document.getElementById('searchInput').addEventListener('input', function(e) {
+
+        // Search functionality for routes
+        document.getElementById('route-search')?.addEventListener('input', function(e) {
             const searchTerm = e.target.value.toLowerCase();
+            const routeCards = document.querySelectorAll('.route-card');
             
-            // Search in all cards
-            document.querySelectorAll('.info-card').forEach(card => {
-                const cardText = card.textContent.toLowerCase();
-                if (cardText.includes(searchTerm)) {
+            routeCards.forEach(card => {
+                const routeName = card.getAttribute('data-route-name');
+                const routeCode = card.getAttribute('data-route-code');
+                
+                if (routeName.includes(searchTerm) || routeCode.includes(searchTerm)) {
                     card.style.display = 'block';
                 } else {
                     card.style.display = 'none';
                 }
             });
         });
-        
-        // Print functionality
-        function printRouteInfo() {
-            const activeTab = document.querySelector('.tab-content.active').id.replace('-tab', '');
-            const tabNames = {
-                'routes': 'Approved Tricycle Routes',
-                'terminals': 'Terminal & Stop Locator',
-                'restrictions': 'Route Restrictions Notice',
-                'updates': 'Service Updates & Notices'
-            };
+
+        // Toggle favorite status
+        function toggleFavorite(routeId) {
+            const button = document.querySelector(`.favorite-btn[data-route-id="${routeId}"]`);
+            const icon = button.querySelector('i');
+            const isFavorite = button.classList.contains('active');
             
-            Swal.fire({
-                title: 'Print Information',
-                text: `Do you want to print the "${tabNames[activeTab]}" information?`,
-                icon: 'question',
-                showCancelButton: true,
-                confirmButtonText: 'Yes, print',
-                cancelButtonText: 'Cancel'
-            }).then((result) => {
-                if (result.isConfirmed) {
-                    const printContent = document.querySelector('.tab-content.active').innerHTML;
-                    const printWindow = window.open('', '_blank');
-                    printWindow.document.write(`
-                        <html>
-                        <head>
-                            <title>Tricycle Route Information - ${tabNames[activeTab]}</title>
-                            <style>
-                                body { font-family: Arial, sans-serif; padding: 20px; }
-                                .card { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
-                                .card-title { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
-                                .card-item { display: flex; justify-content: space-between; margin-bottom: 8px; }
-                                .item-label { color: #666; }
-                                .print-header { text-align: center; margin-bottom: 30px; }
-                                .print-header h1 { color: #0d9488; }
-                                .print-footer { text-align: center; margin-top: 30px; color: #666; font-size: 12px; }
-                            </style>
-                        </head>
-                        <body>
-                            <div class="print-header">
-                                <h1>${tabNames[activeTab]}</h1>
-                                <p>Barangay: ${document.querySelector('.dashboard-subtitle').textContent.split('in ')[1]}</p>
-                                <p>Printed on: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
-                            </div>
-                            ${printContent}
-                            <div class="print-footer">
-                                <p>Generated by Barangay Resident Portal</p>
-                            </div>
-                        </body>
-                        </html>
-                    `);
-                    printWindow.document.close();
-                    printWindow.print();
+            // Send AJAX request to update favorite status
+            const formData = new FormData();
+            formData.append('action', 'toggle_favorite');
+            formData.append('route_id', routeId);
+            
+            fetch(window.location.href, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    if (data.action === 'added') {
+                        button.classList.add('active');
+                        icon.className = 'bx bxs-heart';
+                        Swal.fire({
+                            icon: 'success',
+                            title: 'Added to Favorites',
+                            text: 'Route has been added to your favorites',
+                            timer: 2000,
+                            showConfirmButton: false
+                        });
+                    } else {
+                        button.classList.remove('active');
+                        icon.className = 'bx bx-heart';
+                        Swal.fire({
+                            icon: 'info',
+                            title: 'Removed from Favorites',
+                            text: 'Route has been removed from your favorites',
+                            timer: 2000,
+                            showConfirmButton: false
+                        });
+                    }
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Error',
+                        text: data.message || 'Failed to update favorite status'
+                    });
                 }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Error',
+                    text: 'Failed to update favorite status'
+                });
             });
         }
-        
-        // Add hover effects to cards
-        document.querySelectorAll('.info-card').forEach(card => {
-            card.addEventListener('mouseenter', function() {
-                this.style.transform = 'translateY(-5px)';
+
+        // View route stops
+        function viewRouteStops(routeId) {
+            const stopsDiv = document.getElementById(`stops-${routeId}`);
+            const button = event.currentTarget;
+            
+            if (stopsDiv.style.display === 'none' || stopsDiv.style.display === '') {
+                stopsDiv.style.display = 'block';
+                button.innerHTML = '<i class="bx bx-list-minus"></i> Hide Stops';
+            } else {
+                stopsDiv.style.display = 'none';
+                button.innerHTML = '<i class="bx bx-list-ul"></i> View Stops';
+            }
+        }
+
+        // Show route details modal
+        function showRouteDetails(routeId, routeName) {
+            // Get route details from the card (simplified version)
+            const card = document.querySelector(`.route-card[data-route-id="${routeId}"]`) || 
+                        document.querySelector(`.route-card:has(.favorite-btn[data-route-id="${routeId}"])`);
+            
+            if (card) {
+                const routeCode = card.querySelector('.route-code').textContent;
+                const details = card.querySelectorAll('.detail-item');
+                
+                let detailsHtml = `<div style="text-align: left; max-height: 400px; overflow-y: auto;">`;
+                details.forEach(detail => {
+                    const label = detail.querySelector('.detail-label').textContent;
+                    const value = detail.querySelector('.detail-value').textContent;
+                    detailsHtml += `<p><strong>${label}</strong> ${value}</p>`;
+                });
+                detailsHtml += `</div>`;
+                
+                Swal.fire({
+                    title: `${routeCode} - ${routeName}`,
+                    html: detailsHtml,
+                    confirmButtonText: 'Close',
+                    width: 600,
+                    showCloseButton: true
+                });
+            }
+        }
+
+        // Handle feedback form submission
+        document.getElementById('routeFeedbackForm')?.addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            formData.append('action', 'submit_feedback');
+            
+            // Validate form
+            if (!formData.get('feedback_type') || !formData.get('subject') || !formData.get('message')) {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Missing Information',
+                    text: 'Please fill in all required fields (marked with *)',
+                    confirmButtonText: 'OK'
+                });
+                return;
+            }
+            
+            // Show loading state
+            Swal.fire({
+                title: 'Submitting Feedback...',
+                text: 'Please wait while we process your feedback',
+                allowOutsideClick: false,
+                showConfirmButton: false,
+                willOpen: () => {
+                    Swal.showLoading();
+                }
             });
             
-            card.addEventListener('mouseleave', function() {
-                this.style.transform = 'translateY(0)';
+            // Submit via AJAX
+            fetch(window.location.href, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                Swal.close();
+                
+                if (data.success) {
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Feedback Submitted!',
+                        html: `
+                            <p>Thank you for your feedback. Your reference number is: <strong>${data.feedback_code}</strong></p>
+                            <p>We will review your submission and get back to you if needed.</p>
+                        `,
+                        confirmButtonText: 'OK'
+                    }).then((result) => {
+                        if (result.isConfirmed) {
+                            // Reset form
+                            document.getElementById('routeFeedbackForm').reset();
+                            // Switch back to routes tab
+                            switchTab('routes');
+                        }
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Submission Failed',
+                        text: data.message || 'Failed to submit feedback. Please try again.',
+                        confirmButtonText: 'OK'
+                    });
+                }
+            })
+            .catch(error => {
+                Swal.close();
+                console.error('Error:', error);
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Submission Failed',
+                    text: 'Failed to submit feedback. Please try again.',
+                    confirmButtonText: 'OK'
+                });
             });
         });
-        
-        // Initialize on page load
+
+        // Print page function
+        function printPage() {
+            const printContent = document.querySelector('.tab-pane.active').innerHTML;
+            const originalContent = document.body.innerHTML;
+            
+            document.body.innerHTML = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Barangay Tricycle Route Information - Print</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; margin: 20px; }
+                        h1 { color: #0d9488; }
+                        .route-card { border: 1px solid #ddd; padding: 15px; margin-bottom: 15px; border-radius: 8px; }
+                        .route-code { background-color: #0d9488; color: white; padding: 4px 8px; border-radius: 4px; display: inline-block; }
+                        .detail-item { display: flex; justify-content: space-between; margin-bottom: 5px; }
+                        .print-header { text-align: center; margin-bottom: 20px; border-bottom: 2px solid #0d9488; padding-bottom: 10px; }
+                        .print-footer { text-align: center; margin-top: 30px; font-size: 12px; color: #666; }
+                    </style>
+                </head>
+                <body>
+                    <div class="print-header">
+                        <h1>Barangay Tricycle Route Management</h1>
+                        <p>Printed on: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
+                    </div>
+                    ${printContent}
+                    <div class="print-footer">
+                        <p>Barangay Resident Portal - Traffic and Transport Management System</p>
+                    </div>
+                </body>
+                </html>
+            `;
+            
+            window.print();
+            document.body.innerHTML = originalContent;
+            location.reload(); // Reload to restore functionality
+        }
+
+        // Initialize the page
         document.addEventListener('DOMContentLoaded', function() {
-            // Check if there's a feedback success message
-            <?php if (isset($feedback_success) && $feedback_success): ?>
-                Swal.fire({
-                    icon: 'success',
-                    title: 'Feedback Submitted!',
-                    text: 'Thank you for your feedback.',
-                    timer: 3000,
-                    showConfirmButton: false
-                });
-            <?php endif; ?>
+            // Check if there's a hash in URL to switch tab
+            const hash = window.location.hash.substring(1);
+            if (hash && document.getElementById(hash)) {
+                switchTab(hash);
+            }
+            
+            // Add data-route-id attribute to route cards for easier selection
+            document.querySelectorAll('.route-card').forEach((card, index) => {
+                const routeId = card.querySelector('.favorite-btn')?.getAttribute('data-route-id');
+                if (routeId) {
+                    card.setAttribute('data-route-id', routeId);
+                }
+            });
         });
     </script>
 </body>

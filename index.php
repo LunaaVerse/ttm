@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Traffic and Transport Management</title>
+    <title>Traffic and Transport</title>
     <link rel="icon" type="image/png" href="img/frsm-logo.png">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1787,7 +1787,7 @@
                 <div class="logo-img">
                     <img src="img/ttm.png" alt="TTM Logo" style="width: 100px; height: 100px;">
                 </div>
-                <div class="logo-text">   Traffic and Transport</div>
+                <div class="logo-text">Traffic and Transport</div>
             </div>
 
             <nav id="nav">
@@ -1811,7 +1811,7 @@
                         </div>
                     </div>
                     <div class="auth-buttons">
-                        <a href="login.php" class="auth-btn login-btn">Login</a>
+                        <a href="login/login.php" class="auth-btn login-btn">Login</a>
                         <a href="register.php" class="auth-btn register-btn">Register</a>
                     </div>
                 </ul>
@@ -1826,7 +1826,7 @@
     <!-- Hero Section -->
     <section class="hero" id="home">
         <div class="container hero-content">
-            <h1>Quezon City Fire & Rescue Services</h1>
+            <h1> Barangay Commonwealth Traffic and Transport</h1>
             <p>Protecting lives and properties with excellence, integrity, and bravery</p>
             <a href="#map-section" class="btn">Emergency Response Map</a>
         </div>
