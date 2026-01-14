@@ -1351,7 +1351,7 @@ try {
                     </div>
                     <div id="route-info" class="submenu">
                         <a href="btrm/tricycle_route_info.php" class="submenu-item">View Routes</a>
-                        <a href="user_routes/schedule.php" class="submenu-item">Schedule Information</a>
+                        <a href="btrm/submit_route_feedback.php" class="submenu-item">Route Feedback</a>
                     </div>
                     
                     <!-- 2.2 Report Road Condition -->
