@@ -170,7 +170,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         SET status = 'Verified', 
                             verified_by = :user_id, 
                             verified_date = NOW(),
-                            priority = :priority
+                            priority = :priority,
+                            updated_at = NOW()
                         WHERE id = :id";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([
@@ -185,7 +186,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         SET status = 'Assigned', 
                             assigned_to = :assigned_to, 
                             assigned_date = NOW(),
-                            priority = :priority
+                            priority = :priority,
+                            updated_at = NOW()
                         WHERE id = :id";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([
@@ -199,7 +201,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $sql = "UPDATE road_condition_reports 
                         SET status = 'Rejected',
                             resolution_notes = :notes,
-                            resolved_date = NOW()
+                            resolved_date = NOW(),
+                            updated_at = NOW()
                         WHERE id = :id";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([
@@ -211,7 +214,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'request_clarification':
                 $sql = "UPDATE road_condition_reports 
                         SET status = 'Needs Clarification',
-                            follow_up_notes = :notes
+                            follow_up_notes = :notes,
+                            updated_at = NOW()
                         WHERE id = :id";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([
@@ -224,7 +228,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $sql = "UPDATE road_condition_reports 
                         SET status = 'Resolved',
                             resolution_notes = :notes,
-                            resolved_date = NOW()
+                            resolved_date = NOW(),
+                            updated_at = NOW()
                         WHERE id = :id";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([
@@ -235,7 +240,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 
             case 'update_priority':
                 $sql = "UPDATE road_condition_reports 
-                        SET priority = :priority
+                        SET priority = :priority,
+                            updated_at = NOW()
                         WHERE id = :id";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([
@@ -247,7 +253,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'update_tanod_followup':
                 $sql = "UPDATE road_condition_reports 
                         SET tanod_follow_up = :tanod_id,
-                            follow_up_notes = :notes
+                            follow_up_notes = :notes,
+                            updated_at = NOW()
                         WHERE id = :id";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([
@@ -283,6 +290,7 @@ $tanods = $tanod_stmt->fetchAll(PDO::FETCH_ASSOC);
     <!-- Boxicons CSS -->
     <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
     <style>
+        /* Your CSS styles remain exactly the same as before */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         
         * {
@@ -1855,21 +1863,50 @@ $tanods = $tanod_stmt->fetchAll(PDO::FETCH_ASSOC);
         }
         
         function viewReport(reportId) {
-            // In a real application, you would fetch this via AJAX
-            // For now, we'll just show a placeholder
-            document.getElementById('reportDetails').innerHTML = `
-                <div class="report-details">
-                    <div class="detail-row">
-                        <span class="detail-label">Report ID:</span>
-                        <span class="detail-value">#${reportId}</span>
+            // Simple implementation - in real app, fetch via AJAX
+            const report = <?php echo json_encode($reports); ?>.find(r => r.id == reportId);
+            if (report) {
+                document.getElementById('reportDetails').innerHTML = `
+                    <div class="report-details">
+                        <div class="detail-row">
+                            <span class="detail-label">Report ID:</span>
+                            <span class="detail-value">#${report.id}</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Report Date:</span>
+                            <span class="detail-value">${report.report_date}</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Location:</span>
+                            <span class="detail-value">${report.location}</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Barangay:</span>
+                            <span class="detail-value">${report.barangay}</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Condition Type:</span>
+                            <span class="detail-value">${report.condition_type}</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Severity:</span>
+                            <span class="detail-value">${report.severity}</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Description:</span>
+                            <span class="detail-value">${report.description}</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Status:</span>
+                            <span class="detail-value">${report.status}</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Priority:</span>
+                            <span class="detail-value">${report.priority}</span>
+                        </div>
                     </div>
-                    <div class="detail-row">
-                        <span class="detail-label">Loading details...</span>
-                        <span class="detail-value"></span>
-                    </div>
-                </div>
-                <p>In a real application, this would fetch detailed report information via AJAX.</p>
-            `;
+                `;
+            }
             openModal('viewModal');
         }
         
@@ -1928,7 +1965,6 @@ $tanods = $tanod_stmt->fetchAll(PDO::FETCH_ASSOC);
                 window.location.href = 'export_reports.php?' + params.toString();
             } else if (format === 'pdf') {
                 alert('PDF export would be implemented here');
-                // In a real app: window.location.href = 'export_reports_pdf.php?' + params.toString();
             }
         }
         
@@ -1982,7 +2018,6 @@ $tanods = $tanod_stmt->fetchAll(PDO::FETCH_ASSOC);
             if (e.key === 'Enter') {
                 const searchTerm = this.value.trim();
                 if (searchTerm) {
-                    // In a real app, you would implement search functionality
                     alert(`Searching for: ${searchTerm}`);
                     this.value = '';
                 }

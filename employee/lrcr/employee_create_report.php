@@ -144,12 +144,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Get barangays for dropdown
-$barangays = [
-    'Barangay Poblacion', 'Barangay San Isidro', 'Barangay San Roque',
-    'Barangay Santo Niño', 'Barangay San Antonio', 'Barangay San Jose',
-    'Barangay San Miguel', 'Barangay San Francisco', 'Barangay San Vicente'
-];
+$sql = "SELECT id, name FROM barangays ORDER BY name";
+$stmt = $pdo->prepare($sql);
+$stmt->execute();
+$barangays = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
 <!DOCTYPE html>

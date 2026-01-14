@@ -1345,9 +1345,9 @@ try {
                         </svg>
                     </div>
                     <div id="patrol-oversight" class="submenu">
-                        <a href="mair/staff_report_review.php" class="submenu-item">Patrol Maps</a>
-                        <a href="#" class="submenu-item">Tanod Shift</a>
-                        <a href="#" class="submenu-item">Patrol Efficiency</a>
+                        <a href="mair/admin_report_review.php" class="submenu-item">Report Review & Validation</a>
+                        <a href="mair/severity_analytics.php" class="submenu-item">Severity & Safety Review</a>
+                        <a href="mair/action_referrals.php" class="submenu-item">referrals</a>
                     </div>
                     
                     <!-- 1.4 Tanod Patrol Logs for Traffic -->
