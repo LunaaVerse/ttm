@@ -5,7 +5,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Require database connection
-require_once '../config/db_connection.php';
+require_once '../../config/db_connection.php';
 
 // Function to get user data
 function getUserData($pdo, $user_id = null) {
@@ -1350,7 +1350,7 @@ try {
                         </svg>
                     </div>
                     <div id="route-info" class="submenu">
-                        <a href="user_routes/view_routes.php" class="submenu-item">View Routes</a>
+                        <a href="btrm/tricycle_route_info.php" class="submenu-item">View Routes</a>
                         <a href="user_routes/schedule.php" class="submenu-item">Schedule Information</a>
                     </div>
                     
