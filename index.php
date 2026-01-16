@@ -2622,7 +2622,7 @@
                 <div class="footer-about">
                     <div class="footer-logo">
                         <div class="footer-logo-img">
-                            <img src="img/frsm1.png" alt="QCprotektado Logo" />
+                            <img src="img/ttm.png" alt="QCprotektado Logo" />
                         </div>
                         <div class="footer-logo-text">QCprotektado</div>
                     </div>
