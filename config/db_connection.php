@@ -1,8 +1,8 @@
 <?php
-$host = 'localhost:3307';
-$dbname = 'ttm';
-$username = 'root'; // Change as per your setup
-$password = ''; // Change as per your setup
+$host = '153.92.15.81';
+$dbname = 'u514031374_ttm';
+$username = 'u514031374_ttm'; // Change as per your setup
+$password = 'ttmP@55w0rd'; // Change as per your setup
 
 try {
     $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8", $username, $password);
